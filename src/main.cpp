@@ -32,7 +32,7 @@ WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
 
 // These are the settings that get stored in EEPROM.  They are all in one struct which
-// makes it easier to store and retrieve from EEPROM.
+// makes it easier to store and retrieve.
 typedef struct 
   {
   unsigned int validConfig=0; 
@@ -48,6 +48,8 @@ typedef struct
   int sleepTime=10; //seconds to sleep between distance checks
   char mqttClientId[MQTT_CLIENTID_SIZE]=""; //will be the same across reboots
   bool debug=false;
+  char address[ADDRESS_SIZE]=""; //static address for this device
+  char netmask[ADDRESS_SIZE]=""; //size of network
   } conf;
 
 conf settings; //all settings in one struct makes it easier to store in EEPROM
@@ -84,6 +86,9 @@ MY_RTC myRtc;
 
 ADC_MODE(ADC_VCC); //so we can use the ADC to measure the battery voltage
 
+IPAddress ip;
+IPAddress mask;
+
 void setup() 
   {
   //Immediately turn off the WiFi radio (it comes on when we wake up)
@@ -118,17 +123,20 @@ void setup()
     }
 
   if (settingsAreValid)
-    {
-//    if (settings.debug)
-//      {
-//      Serial.print("Settings object size=");
-//      Serial.println(sizeof(settings));
-//      Serial.print("Read RTC: ");
-//      Serial.println(myRtc.rtc);
-//      Serial.print("Read nextHealthReportTime: ");
-//      Serial.println(myRtc.nextHealthReportTime);
-//      }
-      
+    {      
+    if (!ip.fromString(settings.address))
+      {
+      Serial.println("IP Address "+String(settings.address)+" is not valid. Using dynamic addressing.");
+      // settingsAreValid=false;
+      // settings.validConfig=false;
+      }
+    else if (!mask.fromString(settings.netmask))
+      {
+      Serial.println("Network mask "+String(settings.netmask)+" is not valid.");
+      // settingsAreValid=false;
+      // settings.validConfig=false;
+      }
+
     //Get a measurement and compare the presence with the last one stored in EEPROM.
     //If they are the same, no need to phone home. Unless an hour has passed since
     //the last time home was phoned. 
@@ -273,6 +281,14 @@ void connectToWiFi()
 //    delay(1);              //return control to let it come on
     
     WiFi.mode(WIFI_STA); //station mode, we are only a client in the wifi world
+
+    if (ip.isSet()) //Go with a dynamic address if no valid IP has been entered
+      {
+      if (!WiFi.config(ip,ip,mask))
+        {
+        Serial.println("STA Failed to configure");
+        }
+      }
     WiFi.begin(settings.ssid, settings.wifiPassword);
     while (WiFi.status() != WL_CONNECTED) 
       {
@@ -282,10 +298,16 @@ void connectToWiFi()
       delay(500);
       }
   
-    Serial.println("Connected to network.");
+    Serial.print("Connected to network with address ");
+    Serial.println(WiFi.localIP());
     Serial.println();
 
     myRtc.rssi=WiFi.RSSI(); //save the RSSI for later report
+    }
+  else if (settings.debug)
+    {
+    Serial.print("Actual network address is ");
+    Serial.println(WiFi.localIP());
     }
   }
 
@@ -344,6 +366,10 @@ void incomingMqttHandler(char* reqTopic, byte* payload, unsigned int length)
     strcat(jsonStatus,tempbuf);
     strcat(jsonStatus,"\", \"mqttClientId\":\"");
     strcat(jsonStatus,settings.mqttClientId);
+    strcat(jsonStatus,"\", \"address\":\"");
+    strcat(jsonStatus,settings.address);
+    strcat(jsonStatus,"\", \"netmask\":\"");
+    strcat(jsonStatus,settings.netmask);
     
     strcat(jsonStatus,"\"}");
     response=jsonStatus;
@@ -403,17 +429,17 @@ unsigned long myMillis()
   return millis()+myRtc.rtc;
   }
 
-// Read the distance 10 times and return the dominant value
+// Read the distance SAMPLE_COUNT times and return the dominant value
 int measure()
   {
-  int vals[10];
+  int vals[SAMPLE_COUNT];
   int answer,answerCount=0;
 
-  //get 10 samples
-  for (int i=0;i<10;i++)
+  //get samples
+  for (int i=0;i<SAMPLE_COUNT;i++)
     {
     // Turn on the LED to show activity
-    digitalWrite(LED_BUILTIN,LED_ON);
+//    digitalWrite(LED_BUILTIN,LED_ON);
     
     vals[i]=getDistance();
 
@@ -433,11 +459,11 @@ int measure()
 
   //find the most common value within the sample set
   //This code is not very efficient but hey, it's only 10 values
-  for (int i=0;i<9;i++) //using 9 here because the last one can only have a count of 1
+  for (int i=0;i<SAMPLE_COUNT-1;i++) //using SAMPLE_COUNT-1 here because the last one can only have a count of 1
     {
     int candidate=vals[i];
     int candidateCount=1;  
-    for (int j=i+1;j<10;j++)
+    for (int j=i+1;j<SAMPLE_COUNT;j++)
       {
       if (candidate==vals[j])
         {
@@ -503,10 +529,17 @@ void showSettings()
   Serial.println(")");
   Serial.print("MQTT Client ID is ");
   Serial.println(settings.mqttClientId);
+  Serial.print("Static address is ");
+  Serial.println(settings.address);
+  Serial.print("Network mask is ");
+  Serial.println(settings.netmask);
   Serial.print("debug=1|0 (");
   Serial.print(settings.debug);
   Serial.println(")");
   Serial.println("\n*** Use \"factorydefaults=yes\" to reset all settings ***\n");
+  
+  Serial.print("\nSettings are ");
+  Serial.println(settingsAreValid?"complete.":"incomplete.");
   }
 
 /*
@@ -598,13 +631,20 @@ bool processCommand(String cmd)
     showSettings();
     return false;   //not a valid command, or it's missing
     }
-  else if (strcmp(nme,"broker")==0)
+  else if (strcmp(val,"NULL")==0) //to nullify a value, you have to really mean it
+    {
+    strcpy(val,"");
+    }
+  
+  if (strcmp(nme,"broker")==0)
     {
     strcpy(settings.mqttBrokerAddress,val);
     saveSettings();
     }
   else if (strcmp(nme,"port")==0)
     {
+    if (!val)
+      strcpy(val,"0");
     settings.mqttBrokerPort=atoi(val);
     saveSettings();
     }
@@ -633,23 +673,41 @@ bool processCommand(String cmd)
     strcpy(settings.wifiPassword,val);
     saveSettings();
     }
+  else if (strcmp(nme,"address")==0)
+    {
+    strcpy(settings.address,val);
+    saveSettings();
+    }
+  else if (strcmp(nme,"netmask")==0)
+    {
+    strcpy(settings.netmask,val);
+    saveSettings();
+    }
   else if (strcmp(nme,"mindistance")==0)
     {
+    if (!val)
+      strcpy(val,"0");
     settings.minimumPresenceDistance=atoi(val);
     saveSettings();
     }
   else if (strcmp(nme,"maxdistance")==0)
     {
+    if (!val)
+      strcpy(val,"400");
     settings.maximumPresenceDistance=atoi(val);
     saveSettings();
     }
   else if (strcmp(nme,"sleeptime")==0)
     {
+    if (!val)
+      strcpy(val,"0");
     settings.sleepTime=atoi(val);
     saveSettings();
     }
   else if (strcmp(nme,"debug")==0)
     {
+    if (!val)
+      strcpy(val,"0");
     settings.debug=atoi(val)==1?true:false;
     saveSettings();
     }
@@ -684,6 +742,8 @@ void initializeSettings()
   strcpy(settings.mqttUsername,"");
   strcpy(settings.mqttPassword,"");
   strcpy(settings.mqttTopicRoot,"");
+  strcpy(settings.address,"");
+  strcpy(settings.netmask,"255.255.255.0");
   settings.minimumPresenceDistance=0;
   settings.maximumPresenceDistance=400;
   settings.sleepTime=10;
@@ -869,6 +929,7 @@ void serialEvent()
     {
     // get the new byte
     char inChar = (char)Serial.read();
+    Serial.print(inChar); //echo it back to the terminal
 
     // if the incoming character is a newline, set a flag so the main loop can
     // do something about it 

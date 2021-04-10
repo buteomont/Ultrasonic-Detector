@@ -31,6 +31,7 @@
 //#define MAX_CHANGE_PCT 2 //percent distance change must be greater than this before reporting
 #define FULL_BATTERY 2788 //raw A0 count with two lithium batteries 
 #define ONE_HOUR 3600000 //milliseconds
+#define SAMPLE_COUNT 5 //number of samples to take per measurement 
 
 // Error codes copied from the MQTT library
 // #define MQTT_CONNECTION_REFUSED            -2
